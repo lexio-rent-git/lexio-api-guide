@@ -1,0 +1,95 @@
+---
+title: Disponibilités et devis
+description: Lire les véhicules disponibles et leurs prix, puis créer un devis garanti, en gérant correctement dates locales et montants.
+---
+
+# Disponibilités et devis
+
+Deux appels suffisent pour afficher une offre : `GET /availability` donne les véhicules réservables sur une période avec leur prix, `POST /quotes` fige ce prix dans un devis. Les deux pièges sont les dates et les montants.
+
+## Les dates sont en heure locale du loueur, sans décalage
+
+`startAt` et `endAt` s'écrivent `2026-12-04T09:00` : l'heure qu'affiche l'horloge de l'agence, dans le fuseau `timezone` de `GET /organization`. Envoyer un décalage (`+01:00`, `Z`) répond `400 offset_not_allowed`.
+
+Les réponses, elles, renvoient la date **avec** son décalage (`2026-12-04T09:00:00+01:00`). Si vous renvoyez une date lue dans une réponse, retirez-le d'abord :
+
+```python
+from datetime import datetime
+
+def wall_clock(value: datetime | str) -> str:
+    """Date locale du loueur, au format attendu par l'API (sans décalage)."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M")
+
+wall_clock("2026-12-04T09:00:00+01:00")  # '2026-12-04T09:00'
+```
+
+Ne convertissez pas une date UTC avec `astimezone()` pour la « corriger » : si votre application stocke de l'UTC, convertissez-la d'abord dans le fuseau du loueur (`zoneinfo.ZoneInfo(org["timezone"])`), puis retirez le décalage.
+
+Les instants réels (`actualStartAt`, `occurredAt`…) sont différents : ce sont des horodatages RFC 3339 **avec** décalage, à traiter comme tels.
+
+## Les montants sont en unités majeures
+
+Un montant est un nombre JSON en euros (pas en centimes), avec exactement `currencyExponent` décimales. En Python, ne les additionnez pas en `float` : passez en unités mineures entières, ou en `Decimal`.
+
+```python
+from decimal import Decimal
+
+def to_minor(amount, exponent: int) -> int:
+    return int(Decimal(str(amount)).scaleb(exponent))
+
+to_minor(284.4, 2)  # 28440
+```
+
+Lisez `totalHT`, `vatAmount` et `totalTTC` tels qu'ils arrivent. La TVA est arrondie ligne par ligne : recalculer `totalHT × vatPercent / 100` peut donner quelques centimes d'écart. Pour le reste à payer d'une location, lisez `balance.dueAmount`, qui tient compte des prélèvements en cours.
+
+## Lister les disponibilités
+
+```python
+params = {
+    "startAt": "2026-12-04T09:00",
+    "endAt": "2026-12-07T09:00",
+    "isAvailable": "true",
+}
+for offer in paginate(session, "/availability", **params):
+    vehicle = offer["vehicle"]
+    print(f'{vehicle["brand"]} {vehicle["model"]} ({vehicle["plate"]}) : '
+          f'{offer["totalTTC"]} {offer["currency"]} TTC '
+          f'pour {offer["period"]["billedDays"]} jours facturés')
+```
+
+Chaque élément contient le véhicule, la période facturée, le forfait kilométrique et la franchise appliqués par défaut, la caution, et le détail du prix dans `lines` (tarif de base, remise de durée, options…). Les filtres `vehicleId`, `categoryId` et `vehicleType` restreignent la recherche. `paginate` est défini à la page [Premier appel](/premier-appel).
+
+Un véhicule indisponible apparaît sans le filtre `isAvailable`, avec ses raisons dans `unavailableReasons` : utile pour expliquer à un client pourquoi « la 208 » n'est pas proposée.
+
+## Créer un devis
+
+Le devis reprend un véhicule et une période, et éventuellement un forfait kilométrique, une franchise et des options. Il garantit son prix jusqu'à `expiresAt`.
+
+```python
+import uuid
+
+quote_request = {
+    "vehicleId": offer["vehicle"]["id"],
+    "startAt": "2026-12-04T09:00",
+    "endAt": "2026-12-07T09:00",
+}
+response = session.post(
+    f"{BASE_URL}/quotes",
+    json=quote_request,
+    headers={"Idempotency-Key": str(uuid.uuid4())},
+    timeout=30,
+)
+response.raise_for_status()
+quote = response.json()["data"]
+print(quote["id"], quote["totalTTC"], "valable jusqu'au", quote["expiresAt"])
+```
+
+La clé d'idempotence est facultative sur un devis mais recommandée : si la réponse se perd, le renvoi avec la même clé ne crée pas de second devis. Elle devient **obligatoire** dès qu'on écrit sur une location. Voir [Erreurs et reprises](/erreurs-reprises).
+
+## Et ensuite
+
+La location se crée avec `POST /rentals` à partir du `quoteId` et du client, puis le paiement s'enregistre avec `POST /rentals/{rentalId}/payments`. Le parcours complet, y compris les règles propres aux clés partenaires (horaires d'ouverture, délai de prévenance, durée minimale), est décrit dans [Intégration d'une plateforme de réservation](https://docs.lexio.rent/integration-broker).
+
+Référence : [Montants et TVA](https://docs.lexio.rent/montants-et-tva), [Lister les disponibilités](https://docs.lexio.rent/api-reference/offre/list-availability), [Créer un devis](https://docs.lexio.rent/api-reference/offre/create-quote).

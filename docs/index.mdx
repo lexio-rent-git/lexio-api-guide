@@ -1,0 +1,40 @@
+---
+title: Guide Python de l'API Lexio Rent
+description: Intégrer l'API v1 de Lexio Rent depuis Python, de la vérification de la clé à la synchronisation continue des locations.
+---
+
+# Guide Python de l'API Lexio Rent
+
+[Lexio Rent](https://lexio.rent/logiciel-location-voiture) est un logiciel de gestion pour les agences de location de voitures, d'utilitaires et de deux-roues. Son API REST v1 permet à un loueur, ou à une plateforme qu'il autorise, de lire ses disponibilités et ses prix, de créer des devis et des locations, puis de suivre ce qui change.
+
+La référence complète (tous les endpoints, tous les champs, tous les codes d'erreur) est sur **[docs.lexio.rent](https://docs.lexio.rent)**. Ce guide ne la recopie pas. Il montre, en Python, comment assembler les appels dans un vrai programme, et les pièges qu'on rencontre en le faisant.
+
+## Ce que couvre ce guide
+
+1. [Premier appel](/premier-appel) : configurer un client HTTP correct et vérifier la clé.
+2. [Disponibilités et devis](/disponibilites-devis) : dates sans décalage horaire, montants en unités majeures, devis garanti.
+3. [Synchroniser les locations](/synchronisation) : suivre le flux `GET /events` sans webhook et sans rien perdre.
+4. [Erreurs et reprises](/erreurs-reprises) : clés d'idempotence, `Retry-After`, ce qu'il ne faut jamais renvoyer.
+
+Le dépôt contient aussi un script complet, `exemples/sync_locations.py`, qui garde une copie locale (SQLite) des locations d'une agence.
+
+## Avant de commencer
+
+- **Une clé API du loueur.** Elle commence par `lck_` et se crée dans Lexio, menu *Paramètres → Développeur → Tokens API*. L'API fait partie du plan Business : sans lui, chaque appel répond `403 FEATURE_NOT_AVAILABLE`.
+- **Pas de bac à sable public.** Les appels touchent de vraies données. Pour essayer sans risque, demandez une organisation de démonstration à contact@lexio.rent.
+- **Côté serveur uniquement.** L'API n'envoie pas d'en-têtes CORS. Une clé ne doit jamais se retrouver dans une page web, une application mobile, un journal ou un commit.
+- **Python 3.10 ou plus** et la bibliothèque `requests`.
+
+```bash
+python -m pip install requests
+export LEXIO_API_KEY="lck_..."   # fournie par le loueur
+```
+
+## Pour aller plus loin
+
+- Démarrage rapide officiel, en six appels : [docs.lexio.rent/demarrage-rapide](https://docs.lexio.rent/demarrage-rapide)
+- Spécification OpenAPI 3.1, à donner à un générateur de client : [docs.lexio.rent/openapi.json](https://docs.lexio.rent/openapi.json)
+- Ce qui reste géré dans l'application et pas par l'API (libération de caution, remboursements Stripe, blocages de planning…) : [docs.lexio.rent/ce-qui-se-gere-dans-lexio](https://docs.lexio.rent/ce-qui-se-gere-dans-lexio)
+- Côté métier, un exemple de document que Lexio produit pour les loueurs : le [reçu de dépôt de garantie](https://lexio.rent/outils/recu-depot-de-garantie-location), gratuit.
+
+Ce guide est maintenu par l'équipe [Lexio Rent](https://lexio.rent). Une erreur, un exemple qui ne marche plus ? Ouvrez une issue sur [le dépôt GitHub](https://github.com/lexio-rent-git/lexio-api-guide).

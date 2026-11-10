@@ -1,0 +1,42 @@
+{
+  "$schema": "https://docs.page/schema.json",
+  "name": "Guide Python de l'API Lexio Rent",
+  "description": "Intégrer l'API v1 de Lexio Rent, logiciel de gestion de location de véhicules, depuis un script ou un back-office Python : authentification, disponibilités, devis, synchronisation par événements, reprises sûres.",
+  "logo": {
+    "light": "https://lexio.rent/icon.png",
+    "dark": "https://lexio.rent/icon.png"
+  },
+  "favicon": {
+    "light": "https://lexio.rent/favicon.ico"
+  },
+  "theme": {
+    "primary": "#2563EB"
+  },
+  "seo": {
+    "noindex": false
+  },
+  "anchors": [
+    {
+      "title": "Documentation officielle",
+      "href": "https://docs.lexio.rent",
+      "icon": "book"
+    },
+    {
+      "title": "Lexio Rent",
+      "href": "https://lexio.rent/logiciel-location-voiture",
+      "icon": "car"
+    }
+  ],
+  "sidebar": [
+    {
+      "group": "Guide",
+      "pages": [
+        { "title": "Présentation", "href": "/", "icon": "house" },
+        { "title": "Premier appel", "href": "/premier-appel", "icon": "key" },
+        { "title": "Disponibilités et devis", "href": "/disponibilites-devis", "icon": "calendar" },
+        { "title": "Synchroniser les locations", "href": "/synchronisation", "icon": "rotate" },
+        { "title": "Erreurs et reprises", "href": "/erreurs-reprises", "icon": "shield" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+---
+title: Synchroniser les locations
+description: Garder une copie à jour des locations Lexio avec le flux GET /events, sans webhook et sans perdre d'événement.
+---
+
+# Synchroniser les locations
+
+L'API n'a pas de webhooks. Pour qu'un autre système (un tableau de bord, une compta, un CRM) suive les locations d'une agence, on lit un **flux d'événements** à son rythme : `GET /events`. Ce modèle a un avantage : si votre programme s'arrête une heure, il reprend là où il en était, rien n'est perdu tant que l'arrêt dure moins de 30 jours.
+
+## Comment fonctionne le flux
+
+- Quatre types d'événements : `rental.created`, `rental.updated`, `rental.cancelled`, `rental.deleted`.
+- Les événements sont **minces** : ils disent quelle location a changé, pas ce qui a changé. On relit la location avec `GET /rentals/{rentalId}`.
+- Chaque réponse contient un `nextCursor`, **toujours présent**, même sur une page vide. On le stocke et on le renvoie tel quel au prochain appel.
+- Un curseur expire au bout de 30 jours : `410 CURSOR_EXPIRED`. Il faut alors refaire une synchronisation complète.
+- Les clients, véhicules, photos et documents n'émettent pas d'événement. Seules les locations sont suivies.
+
+## Démarrage : poser un curseur, puis copier l'existant
+
+L'ordre compte. On prend d'abord un curseur sur « maintenant » avec `start=LATEST` (la réponse ne contient aucun événement, seulement le curseur), **puis** on copie toutes les locations. Un changement qui arrive pendant la copie sera rejoué ensuite par le flux : au pire, une location est relue deux fois, jamais oubliée.
+
+```python
+def initial_sync(session, store):
+    response = session.get(f"{BASE_URL}/events", params={"start": "LATEST"}, timeout=30)
+    response.raise_for_status()
+    cursor = response.json()["nextCursor"]
+
+    for rental in paginate(session, "/rentals"):
+        store.upsert(rental)
+
+    store.save_cursor(cursor)
+```
+
+## La boucle de suivi
+
+```python
+import time
+
+def follow(session, store):
+    cursor = store.load_cursor()
+    while True:
+        response = session.get(
+            f"{BASE_URL}/events",
+            params={"cursor": cursor, "limit": 100},
+            timeout=30,
+        )
+        if response.status_code == 410:          # CURSOR_EXPIRED
+            initial_sync(session, store)
+            cursor = store.load_cursor()
+            continue
+        response.raise_for_status()
+        page = response.json()
+
+        for event in page["data"]:                # dans l'ordre de la page
+            rental_id = event["resource"]["id"]
+            if event["type"] == "rental.deleted":
+                store.delete(rental_id)
+            else:
+                rental = session.get(f"{BASE_URL}/rentals/{rental_id}", timeout=30)
+                if rental.status_code == 404:     # supprimée entre-temps
+                    store.delete(rental_id)
+                    continue
+                rental.raise_for_status()
+                store.upsert(rental.json()["data"])
+
+        cursor = page["nextCursor"]
+        store.save_cursor(cursor)                 # après traitement, pas avant
+
+        if len(page["data"]) < 100:
+            time.sleep(30)                        # page incomplète : on est à jour
+```
+
+Points à respecter :
+
+- **Sauvegardez le curseur après avoir traité la page.** Si le programme plante au milieu, la page sera relue au redémarrage. Votre `upsert` doit donc être idempotent (écraser la ligne, pas en ajouter une).
+- **Traitez les événements dans l'ordre de la page**, pas dans l'ordre de `occurredAt`.
+- **Page pleine : relisez tout de suite. Page incomplète : attendez** de 10 à 60 secondes. Inutile d'interroger plus souvent.
+- **Une `rental.cancelled` reste une location** : relisez-la, son `status` passe à `CANCELLED`. Seule `rental.deleted` la retire.
+- Les statuts actuels sont `PENDING_APPROVAL`, `RESERVED`, `IN_PROGRESS`, `COMPLETED` et `CANCELLED`. Prévoyez qu'un nouveau statut puisse apparaître.
+
+## Le script complet
+
+`exemples/sync_locations.py`, dans [le dépôt](https://github.com/lexio-rent-git/lexio-api-guide), assemble ces morceaux avec un stockage SQLite, la gestion des `429` et un arrêt propre :
+
+```bash
+export LEXIO_API_KEY="lck_..."
+python exemples/sync_locations.py --db locations.sqlite
+```
+
+Il ne fait que des lectures : la clé n'a besoin que du scope `rentals.read`.
+
+Référence : [Synchronisation](https://docs.lexio.rent/synchronisation), [Cycle de vie d'une location](https://docs.lexio.rent/cycle-de-vie), [Lister les événements](https://docs.lexio.rent/api-reference/evenements/list-events).

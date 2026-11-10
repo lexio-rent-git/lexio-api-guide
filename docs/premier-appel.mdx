@@ -1,0 +1,85 @@
+---
+title: Premier appel
+description: Configurer une session requests pour l'API Lexio Rent et vérifier la clé avec GET /organization.
+---
+
+# Premier appel
+
+## Une session HTTP réutilisable
+
+Toutes les requêtes partent de la même URL de base et portent la clé dans l'en-tête `Authorization`. Le plus simple est une `requests.Session` configurée une fois :
+
+```python
+import os
+import requests
+
+BASE_URL = "https://api.lexio.rent/api/external/v1"
+
+def lexio_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {os.environ['LEXIO_API_KEY']}",
+        "Accept": "application/json",
+        "User-Agent": "mon-integration/1.0 (contact@example.com)",
+    })
+    return session
+```
+
+Trois remarques sur ces en-têtes :
+
+- **`Bearer` est la seule forme acceptée** en v1. La clé ne va jamais dans l'URL.
+- **Donnez un `User-Agent` qui vous identifie.** Le pare-feu devant `api.lexio.rent` refuse certains agents par défaut : avec le module standard `urllib`, son `Python-urllib/3.x` reçoit une erreur `1010` avant même d'atteindre l'API. `requests` passe, mais un nom explicite aide aussi le support à retrouver vos appels.
+- La clé est lue dans une variable d'environnement. Ne l'affichez pas, ne la journalisez pas.
+
+## Vérifier la clé
+
+`GET /organization` répond avec n'importe quelle clé valide. C'est le bon premier appel : il confirme que la clé fonctionne et donne des réglages dont tout le reste dépend.
+
+```python
+session = lexio_session()
+response = session.get(f"{BASE_URL}/organization", timeout=30)
+response.raise_for_status()
+org = response.json()["data"]
+
+print(org["timezone"])          # fuseau du loueur, pour interpréter startAt / endAt
+print(org["currency"])          # devise des montants
+print(org["currencyExponent"])  # nombre de décimales des montants
+```
+
+La réponse décrit aussi la clé elle-même : ses scopes, son éventuel code partenaire et sa date d'expiration. Gardez `timezone`, `currency` et `currencyExponent` en mémoire, la page suivante s'en sert.
+
+## Lire les réponses
+
+Toutes les réponses suivent la même enveloppe :
+
+| Appel | Corps |
+|---|---|
+| Lecture d'une ressource | `{ "data": {...} }` |
+| Liste | `{ "data": [...], "nextCursor": "..." }` |
+| Action (annuler, remettre le véhicule…) | `{ "data": {...}, "effects": {...} }` |
+
+Ignorez les champs que vous ne connaissez pas et tolérez les valeurs d'énumération nouvelles : l'API peut en ajouter sans changer de version. À l'inverse, n'envoyez jamais de champ non documenté : il est refusé avec un `400`.
+
+## Parcourir une liste
+
+Les listes sont paginées par curseur : `limit` de 1 à 100 (50 par défaut), puis on renvoie `nextCursor` dans `cursor`. La liste est finie quand `nextCursor` vaut `null`. Une page peut être courte, ou même vide, sans être la dernière.
+
+```python
+def paginate(session, path, **params):
+    params.setdefault("limit", 100)
+    while True:
+        response = session.get(f"{BASE_URL}{path}", params=params, timeout=30)
+        response.raise_for_status()
+        body = response.json()
+        yield from body["data"]
+        if body.get("nextCursor") is None:
+            return
+        params["cursor"] = body["nextCursor"]
+
+for vehicle in paginate(session, "/vehicles"):
+    print(vehicle["id"], vehicle["name"])
+```
+
+Ce générateur ne gère pas encore les limites de débit (`429`). La page [Erreurs et reprises](/erreurs-reprises) le complète.
+
+Référence : [Authentification](https://docs.lexio.rent/authentification) et [Pagination](https://docs.lexio.rent/pagination) sur docs.lexio.rent.

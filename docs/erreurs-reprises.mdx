@@ -1,0 +1,96 @@
+---
+title: Erreurs et reprises
+description: Clés d'idempotence, Retry-After et règles de renvoi pour écrire sur l'API Lexio Rent sans doublon.
+---
+
+# Erreurs et reprises
+
+Une écriture peut réussir côté serveur alors que sa réponse se perd en route. Sans précaution, le renvoi crée une deuxième location ou un deuxième paiement. L'API Lexio règle ce problème avec des clés d'idempotence, à condition de les utiliser correctement.
+
+## Les erreurs ont un code stable
+
+Les erreurs suivent le format RFC 9457 (`application/problem+json`) :
+
+```json
+{
+  "type": "https://api.lexio.rent/errors/feature-not-available",
+  "title": "Fonctionnalité non incluse",
+  "status": 403,
+  "code": "FEATURE_NOT_AVAILABLE",
+  "detail": "Fonctionnalité non incluse dans l'abonnement du loueur.",
+  "requestId": "7b4df2e4-9f60-496b-be87-91d8880b0064"
+}
+```
+
+Branchez votre logique sur `code`, jamais sur `title` ou `detail` qui sont des libellés. Un `code` inconnu se traite selon son statut HTTP. Chaque réponse porte aussi un en-tête `X-Request-Id` : citez-le en écrivant au support.
+
+## Une clé d'idempotence par opération
+
+L'en-tête `Idempotency-Key` est **obligatoire** sur toute écriture qui touche une location (création, modification, annulation, départ, retour, report, options) et sur les paiements. Sans lui, la requête répond `400`.
+
+La règle : **une clé par opération métier, réutilisée à l'identique pour chacun de ses renvois.** Générez-la avant le premier essai, pas à chaque essai.
+
+```python
+import uuid
+
+def cancel_rental(session, rental_id: str, reason: str):
+    key = str(uuid.uuid4())                    # une fois, avant la boucle
+    body = {"reason": reason}
+    return send_with_retry(
+        session, "POST", f"/rentals/{rental_id}/cancel",
+        json=body, headers={"Idempotency-Key": key},
+    )
+```
+
+- Même clé, même corps : la réponse d'origine est rejouée, avec `Idempotent-Replayed: true`.
+- Même clé, corps différent : `422 IDEMPOTENCY_KEY_REUSED`. Une requête corrigée prend une **nouvelle** clé.
+- Une clé vit 24 heures.
+
+## Que renvoyer, que ne pas renvoyer
+
+```python
+import time
+import requests
+
+RETRY_SAME = {429, 502, 504}
+RETRY_SAME_CODES = {"IDEMPOTENCY_IN_FLIGHT", "RENTAL_BUSY"}
+
+def send_with_retry(session, method, path, attempts=5, **kwargs):
+    for attempt in range(attempts):
+        try:
+            response = session.request(method, f"{BASE_URL}{path}", timeout=30, **kwargs)
+        except (requests.ConnectionError, requests.Timeout):
+            time.sleep(2 ** attempt)           # réseau : renvoi identique, même clé
+            continue
+
+        code = None
+        if response.headers.get("Content-Type", "").startswith("application/problem+json"):
+            code = response.json().get("code")
+
+        if response.status_code in RETRY_SAME or code in RETRY_SAME_CODES:
+            time.sleep(int(response.headers.get("Retry-After", 2 ** attempt)))
+            continue
+        return response                         # succès ou erreur à traiter par l'appelant
+    raise RuntimeError(f"{method} {path} : abandon après {attempts} essais")
+```
+
+Ce que l'appelant doit traiter lui-même, **sans renvoyer** :
+
+| Réponse | Sens | Que faire |
+|---|---|---|
+| `409 IDEMPOTENCY_ALREADY_APPLIED` | l'écriture a eu lieu, sa réponse s'est perdue | relire la ressource indiquée par `resourceId` |
+| `409 ALREADY_EXISTS` | la ressource existe déjà (par exemple même `partnerReference`) | relire `conflictingId` |
+| `409 RENTAL_CHANGED`, `409 PRICE_CHANGED` | la location ou le prix a bougé depuis votre lecture | relire, puis décider |
+| autre `4xx` | requête refusée | corriger la requête, avec une nouvelle clé |
+
+Les `500` et `503` sont un cas à part : sur une lecture, ou sur une opération qui déclare `IDEMPOTENCY_ALREADY_APPLIED` (devis, location, actions sur une location, paiements), on peut renvoyer à l'identique. Sur une autre écriture, vérifiez d'abord si elle a eu lieu. Le tableau complet est dans [Idempotence et reprise](https://docs.lexio.rent/idempotence).
+
+## Tester sans écrire
+
+Beaucoup d'écritures acceptent `?dryRun=true` : la réponse montre le résultat sans rien enregistrer, et ne demande pas de clé d'idempotence. C'est le bon réflexe avant une annulation ou un report quand on n'a pas d'organisation de démonstration.
+
+## Limites de débit
+
+Par clé : 120 requêtes par minute au total, dont 60 écritures ; `POST /rentals` et les dépôts de photos sont limités à 30 par tranche de 5 minutes. Au-delà, la réponse est `429 RATE_LIMITED` avec `Retry-After` en secondes. `send_with_retry` ci-dessus le respecte.
+
+Référence : [Erreurs](https://docs.lexio.rent/erreurs), [Idempotence et reprise](https://docs.lexio.rent/idempotence), [Limites](https://docs.lexio.rent/limites).
